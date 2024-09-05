@@ -82,7 +82,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: |
           rm -f packages/*
-          make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1
+          make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
       
       - name: Publish artifact
         uses: actions/upload-artifact@v2
@@ -100,7 +100,7 @@ jobs:
         run: |
           rm -f packages/*
           TAGNAME=${{ steps.tag.outputs.tag }}
-          make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1 PACKAGE_VERSION=${TAGNAME#v}
+          make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless PACKAGE_VERSION=${TAGNAME#v}
 
       - name: Release
         uses: softprops/action-gh-release@v1
