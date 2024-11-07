@@ -8,9 +8,9 @@
 #import <Accounts/Accounts.h>
 #import <CaptainHook/CaptainHook.h>
 #import <Foundation/Foundation.h>
-#import <libSandy.h>
-#import <rocketbootstrap/rocketbootstrap.h>
 #import <rootless.h>
+#import "CrossOverIPC.h"
+
 
 @interface MicroPaymentQueueRequest : NSObject
 @property(retain) NSNumber *userIdentifier;
@@ -25,8 +25,8 @@
 @end
 
 @interface SSAccount : NSObject
-@property(nonatomic, readonly) ACAccount *backingAccount;
-@property(nonatomic, retain) dispatch_queue_t backingAccountAccessQueue;
+@property (readonly, nonatomic) ACAccount *backingAccount;
+@property (retain, nonatomic) NSObject *backingAccountAccessQueue; // ivar: _backingAccountAccessQueue
 @property(copy) NSString *ITunesPassSerialNumber;
 @property(copy) NSString *altDSID;
 @property(copy) NSString *accountName;
@@ -94,6 +94,13 @@
 - (NSData *)signData:(NSData *)data bag:(NSDictionary *)bag error:(NSError **)err;
 @end
 
+@interface KbsyncTweakHandler : NSObject
++ (instancetype)sharedInstance;
+- (NSDictionary *)Callback_handleHeaders:(NSString *)msgName userInfo:(NSDictionary *)userInfo;
+- (NSDictionary *)Callback_handleSign:(NSString *)msgName userInfo:(NSDictionary *)userInfoData;
+@end
+
+
 static inline char itoh(int i) {
     if (i > 9)
         return 'A' + (i - 10);
@@ -116,20 +123,38 @@ static NSString *NSDataToHex(NSData *data) {
     return [[NSString alloc] initWithBytesNoCopy:buf length:len * 2 encoding:NSASCIIStringEncoding freeWhenDone:YES];
 }
 
-static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID, CFDataRef data, void *info) {
-    // ...
+@implementation KbsyncTweakHandler
 
-    NSDictionary *args = [NSPropertyListSerialization propertyListWithData:(__bridge NSData *)data
-                                                                   options:kNilOptions
-                                                                    format:nil
-                                                                     error:nil];
++ (instancetype)sharedInstance {
+    static KbsyncTweakHandler *sharedInstance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sharedInstance = [[self alloc] init];
+    });
+    return sharedInstance;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        NSLog(@"KbsyncTweakHandler initialized.");
+    }
+    return self;
+}
+
+- (NSDictionary *)Callback_handleHeaders:(NSString *)msgName userInfo:(NSDictionary *)userInfo {
+    NSDictionary *args = userInfo;
 
     SSAccount *account = [[SSAccountStore defaultStore] activeAccount];
     unsigned long long accountID = [[account uniqueIdentifier] unsignedLongLongValue];
+
+    NSLog(@"Account details: altDSID = %@, uniqueIdentifier = %@", account.altDSID, account.uniqueIdentifier);
+
     NSLog(@"Got account %@, id %llu", account, accountID);
 
     NSLog(@"Start to calc kbsync and sbsync, base offset: 0x%lx.", _dyld_get_image_vmaddr_slide(0));
-    CFDataRef kbsync = NULL;
+
+    NSData *kbsync = nil;
+
     {
         Class KeybagSyncOperationCls = NSClassFromString(@"KeybagSyncOperation");
         NSLog(@"Got KeybagSyncOperation class: %p.", KeybagSyncOperationCls);
@@ -140,30 +165,24 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
         IMP RunIMP = method_getImplementation(RunMethod);
         NSLog(@"Got -run implementation: %p.", RunIMP);
 
-#if __arm64e__
+        #if __arm64e__
         const uint32_t *kbsync_caller = (uint32_t *)make_sym_readable((void *)RunIMP);
-#else
+        #else
         const uint32_t *kbsync_caller = (uint32_t *)RunIMP;
-#endif
+        #endif
+
         const uint8_t mov_w1_0xb[] = {
-            0x61,
-            0x01,
-            0x80,
-            0x52,
+            0x61, 0x01, 0x80, 0x52,
         };
         while (*kbsync_caller++ != *(uint32_t *)&mov_w1_0xb[0])
             ;
         NSLog(@"Parsed kbsync caller: %p.", kbsync_caller);
 
-        // decode the bl instruction to get the real kbsync callee
-        // 31 30 29 28 27 26 25 ... 0
-        //  1  0  0  1  0  1  - imm -
         int blopcode, blmask;
         blopcode = *(int *)kbsync_caller;
         blmask = 0xFC000000;
         if (blopcode & (1 << 26)) {
-            // sign extend
-            blopcode |= blmask;
+            blopcode |= blmask; // sign extend
         } else {
             blopcode &= ~blmask;
         }
@@ -171,53 +190,46 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
         long kbsync_entry = (long)kbsync_caller + (blopcode << 2);
         NSLog(@"Decoded kbsync entry: 0x%lx.", kbsync_entry);
 
-#if __arm64e__
+        #if __arm64e__
         kbsync_entry = (long)make_sym_callable((void *)kbsync_entry);
-#endif
+        #endif
 
-        // call the kbsync calc entry
-        kbsync = ((CFDataRef(*)(long, int))kbsync_entry)(accountID, 0xB);
-        NSLog(@"Got kbsync: %@", (__bridge NSData *)kbsync);
+        kbsync = (__bridge NSData *)((CFDataRef(*)(long, int))kbsync_entry)(accountID, 0xB);
+        NSLog(@"Got kbsync: %@", [kbsync base64EncodedStringWithOptions:kNilOptions]);
     }
 
-    NSData *sbsync = NULL;
+    NSData *sbsync = nil;
+
     do {
         Class PurchaseOperationCls = NSClassFromString(@"PurchaseOperation");
         NSLog(@"Got PurchaseOperation class: %p.", PurchaseOperationCls);
 
-        Method FairMethod = class_getInstanceMethod(
-            PurchaseOperationCls, NSSelectorFromString(@"_addFairPlayToRequestProperties:withAccountIdentifier:"));
+        Method FairMethod = class_getInstanceMethod(PurchaseOperationCls, NSSelectorFromString(@"_addFairPlayToRequestProperties:withAccountIdentifier:"));
         NSLog(@"Got -_addFairPlayToRequestProperties:withAccountIdentifier: method: %p.", FairMethod);
 
         IMP FairIMP = method_getImplementation(FairMethod);
         NSLog(@"Got -_addFairPlayToRequestProperties:withAccountIdentifier: implementation: %p.", FairIMP);
 
-#if __arm64e__
+        #if __arm64e__
         const uint32_t *machine_id_caller = (uint32_t *)make_sym_readable((void *)FairIMP);
-#else
+        #else
         const uint32_t *machine_id_caller = (uint32_t *)FairIMP;
-#endif
+        #endif
+
         const uint8_t movn_x0_0x0[] = {
-            0x00,
-            0x00,
-            0x80,
-            0x92,
+            0x00, 0x00, 0x80, 0x92,
         };
         CFDataRef machine_id = NULL;
         while (*machine_id_caller++ != *(uint32_t *)&movn_x0_0x0[0])
             ;
         NSLog(@"Parsed machine_id caller: %p.", machine_id_caller);
 
-        // decode the bl instruction to get the real kbsyn callee
-        // 31 30 29 28 27 26 25 ... 0
-        //  1  0  0  1  0  1  - imm -
         int blopcode, blmask;
         blopcode = *(int *)machine_id_caller;
         blmask = 0xFC000000;
         if (blopcode & (1 << 26)) {
-            // sign extend
             blopcode |= blmask;
-            blopcode ^= blmask;
+            blopcode ^= blmask; // sign extend
         } else {
             blopcode &= ~blmask;
         }
@@ -225,11 +237,10 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
         long machine_id_entry = (long)machine_id_caller + (blopcode << 2);
         NSLog(@"Decoded machine_id entry: 0x%lx.", machine_id_entry);
 
-#if __arm64e__
+        #if __arm64e__
         machine_id_entry = (long)make_sym_callable((void *)machine_id_entry);
-#endif
+        #endif
 
-        // call the machine_id calc entry
         char *md_str = NULL;
         size_t md_len = 0;
         char *amd_str = NULL;
@@ -249,24 +260,24 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
         NSError *sbsyncErr = nil;
         PurchaseOperation *purchaseOp = [[NSClassFromString(@"PurchaseOperation") alloc] init];
         SSVFairPlaySubscriptionController *fairPlayCtrl = [purchaseOp _fairPlaySubscriptionController];
-        BOOL sbsyncSucceed =
-            [fairPlayCtrl generateSubscriptionBagRequestWithAccountUniqueIdentifier:accountID
-                                                                    transactionType:0x138 /* PurchaseOperation */
-                                                                      machineIDData:mdData
-                                                       returningSubscriptionBagData:&sbsync
-                                                                              error:&sbsyncErr];
+        BOOL sbsyncSucceed = [fairPlayCtrl generateSubscriptionBagRequestWithAccountUniqueIdentifier:accountID
+                                                                                      transactionType:0x138
+                                                                                        machineIDData:mdData
+                                                                             returningSubscriptionBagData:&sbsync
+                                                                                                error:&sbsyncErr];
         if (!sbsyncSucceed) {
             NSLog(@"Failed to generate subscription bag request: %@", sbsyncErr);
             break;
         }
 
-        NSLog(@"Got sbsync: %@", sbsync);
+        NSLog(@"Got sbsync: %@", [sbsync base64EncodedStringWithOptions:kNilOptions]);
     } while (0);
 
     NSMutableDictionary *returnDict = [NSMutableDictionary dictionary];
-    dispatch_sync(account.backingAccountAccessQueue, ^{
-      returnDict[@"backingIdentifier"] = [[account backingAccount] identifier];
+    dispatch_sync((dispatch_queue_t)account.backingAccountAccessQueue, ^{
+        returnDict[@"backingIdentifier"] = [[account backingAccount] identifier];
     });
+
     if ([account ITunesPassSerialNumber]) {
         returnDict[@"iTunesPassSerialNumber"] = [account ITunesPassSerialNumber];
     }
@@ -295,12 +306,17 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
     returnDict[@"guid"] = [[NSClassFromString(@"ISDevice") sharedInstance] guid];
 
     NSURL *url = [NSURL URLWithString:args[@"url"]];
+    NSLog(@"URL for request: %@", url);
     ISStoreURLOperation *operation = [[NSClassFromString(@"ISStoreURLOperation") alloc] init];
     NSURLRequest *urlRequest = [operation newRequestWithURL:url];
     AMSURLRequest *amsRequest = [[NSClassFromString(@"AMSURLRequest") alloc] initWithRequest:urlRequest];
     NSMutableDictionary *headerFields = [[urlRequest allHTTPHeaderFields] mutableCopy];
+    NSLog(@"Headers for AMS request: %@", headerFields);
+
 
     ACAccount *amsAccount = [[ACAccountStore ams_sharedAccountStore] ams_activeiTunesAccount];
+    NSLog(@"AMS Account details: username = %@, identifier = %@", amsAccount.username, amsAccount.identifier);
+
     AMSBagNetworkDataSource *bagSource = [NSClassFromString(@"AMSAnisette") createBagForSubProfile];
     NSDictionary *amsHeader1 = [[NSClassFromString(@"AMSAnisette") headersForRequest:amsRequest
                                                                              account:amsAccount
@@ -319,16 +335,14 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
     }
 
     [headerFields removeObjectForKey:@"Authorization"];
-
     returnDict[@"headers"] = headerFields;
 
     NSString *kbsyncString = nil;
     if ([args[@"kbsyncType"] isEqualToString:@"hex"]) {
-        kbsyncString = NSDataToHex(CFBridgingRelease(kbsync));
+        kbsyncString = NSDataToHex(kbsync);
     } else {
-        kbsyncString = [CFBridgingRelease(kbsync) base64EncodedStringWithOptions:kNilOptions];
+        kbsyncString = [kbsync base64EncodedStringWithOptions:kNilOptions];
     }
-    NSLog(@"kbsync_result_callback %@", kbsyncString);
     returnDict[@"kbsync"] = kbsyncString;
 
     NSString *sbsyncString = nil;
@@ -337,63 +351,43 @@ static CFDataRef Callback_handleHeaders(CFMessagePortRef port, SInt32 messageID,
     } else {
         sbsyncString = [sbsync base64EncodedStringWithOptions:kNilOptions];
     }
-    NSLog(@"sbsync_result_callback %@", sbsyncString);
     returnDict[@"sbsync"] = sbsyncString;
 
-    if (kbsync || sbsync) {
-        return (CFDataRef)CFBridgingRetain([NSPropertyListSerialization
-            dataWithPropertyList:returnDict
-                          format:NSPropertyListBinaryFormat_v1_0
-                         options:kNilOptions
-                           error:nil]);
-    }
-
-    NSLog(@"kbsync_result_callback %@", @"error, you should download something in the App Store to init kbsync.");
-    return nil;
+    return returnDict;
 }
 
-static CFDataRef Callback_handleSign(CFMessagePortRef port, SInt32 messageID, CFDataRef data, void *info) {
-    // ...
+- (NSDictionary *)Callback_handleSign:(NSString *)msgName userInfo:(NSDictionary *)userInfoData {
+    NSDictionary *userInfo = [NSPropertyListSerialization propertyListWithData:(NSData *)userInfoData
+                                                                       options:kNilOptions
+                                                                        format:nil
+                                                                         error:nil];
 
-    NSDictionary *args = [NSPropertyListSerialization propertyListWithData:(__bridge NSData *)data
-                                                                   options:kNilOptions
-                                                                    format:nil
-                                                                     error:nil];
-
-    NSData *signbody = args[@"body"];
-    NSNumber *mescalType = args[@"mescalType"]; // 1 or 2
-    NSDictionary *bagDict = args[@"bag"]; // 1 or 2
-
+    NSData *signbody = userInfo[@"body"];
+    NSNumber *mescalType = userInfo[@"mescalType"]; // 1 or 2
+    NSDictionary *bagDict = userInfo[@"bag"]; // 1 or 2
 
     NSMutableDictionary *returnDict = [NSMutableDictionary dictionary];
 
     NSLog(@"Start to calc signSap...");
+
     AMSMescalSession *session = [NSClassFromString(@"AMSMescalSession") sessionWithType:[mescalType intValue]];
 
     NSError *retError = nil;
     NSData *signature = [session signData:signbody bag:bagDict error:&retError];
+
     if (retError != nil) {
         NSLog(@"kbsync_result_callback cannot call [AMSMescalSession signData]: %@", retError);
         return nil;
     }
+
     NSString *signatureString = NSDataToHex(signature);
 
     returnDict[@"signature"] = signatureString;
-    return (CFDataRef)CFBridgingRetain([NSPropertyListSerialization
-            dataWithPropertyList:returnDict
-                          format:NSPropertyListBinaryFormat_v1_0
-                         options:kNilOptions
-                           error:nil]);
+
+    return returnDict;
 }
 
-static CFDataRef Callback(CFMessagePortRef port, SInt32 messageID, CFDataRef data, void *info) {
-    if (messageID == 0x1111) { // kbsynctool's default messageID
-        return Callback_handleHeaders(port, messageID, data, info);
-    } else if (messageID == 0x2222) { // kbsynctool's signature messageID
-        return Callback_handleSign(port, messageID, data, info);
-    }
-    return nil;
-}
+@end
 
 CHConstructor {
 
@@ -412,25 +406,21 @@ CHConstructor {
                   __dyn_libSandy_applyProfile("KbsyncTool");
               }
           }
-
-          kern_return_t unlockRet = rocketbootstrap_unlock("com.darwindev.kbsync.port");
-          if (unlockRet != KERN_SUCCESS) {
-              os_log_error(OS_LOG_DEFAULT, "Failed to unlock com.darwindev.kbsync.port: %d", unlockRet);
-          }
-
-          localPort = CFMessagePortCreateLocal(nil, CFSTR("com.darwindev.kbsync.port"), Callback, nil, nil);
         });
 
-        if (!localPort) {
-            return;
+        CrossOverIPC *crossOverIPC = [objc_getClass("CrossOverIPC") centerNamed:@"com.darwindev.kbsync.port" type:SERVICE_TYPE_LISTENER];
+        if (crossOverIPC) {
+
+            KbsyncTweakHandler *handler = [KbsyncTweakHandler sharedInstance];
+
+            [crossOverIPC registerForMessageName:@"kbsync" target:handler selector:@selector(Callback_handleHeaders:userInfo:)];
+            [crossOverIPC registerForMessageName:@"kbsync_signature" target:handler selector:@selector(Callback_handleSign:userInfo:)];
+
+            NSLog(@"kbsync & kbsync_signature handlers registered.");
+        } else {
+            NSLog(@"Failed to initialize CrossOverIPC listener.");
         }
 
-        os_log_info(OS_LOG_DEFAULT, "Registering com.darwindev.kbsync.port: %p", localPort);
-
-        CFRunLoopSourceRef runLoopSource = CFMessagePortCreateRunLoopSource(kCFAllocatorDefault, localPort, 0);
-
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
-
-        rocketbootstrap_cfmessageportexposelocal(localPort);
     }
 }
+
