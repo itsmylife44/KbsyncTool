@@ -1,11 +1,10 @@
-@import CoreFoundation;
-@import Foundation;
-
+#import <CoreFoundation/CoreFoundation.h>
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 #include <pthread.h>
 #include <time.h>
 #include <dlfcn.h>
-#import <objc/runtime.h>
 
 
 typedef enum CrossOverIPCServiceType : CFIndex {
