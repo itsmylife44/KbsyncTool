@@ -72,7 +72,9 @@ jobs:
 
       - name: Prepare building
         run: |
-          ln -s layout/Library/MobileSubstrate/DynamicLibraries/KbsyncTweak.plist
+          if [ ! -L "KbsyncTweak.plist" ]; then
+            ln -s layout/Library/MobileSubstrate/DynamicLibraries/KbsyncTweak.plist
+          fi
       # Enable tmate debugging of manually-triggered workflows if the input option was provided
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
