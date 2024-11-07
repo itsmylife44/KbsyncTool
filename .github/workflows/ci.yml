@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v2
         with:
           fetch-depth: 0
-          submodules: recursive  
+          submodules: recursive
       - name: Update submodules
         run: |
           git submodule update --init --recursive
@@ -50,9 +50,9 @@ jobs:
 
       - name: Theos Setup (Setup)
         uses: NyaMisty/theos-action@master
-        with: 
+        with:
           theos-sdks: https://github.com/theos/sdks
-    
+
       - name: Setup libSandy
         run: |
           set -x
@@ -69,7 +69,7 @@ jobs:
             bash -x release_build.sh
             bash -x install_to_theos.sh
           fi
-      
+
       - name: Prepare building
         run: |
           ln -s layout/Library/MobileSubstrate/DynamicLibraries/KbsyncTweak.plist
@@ -83,9 +83,9 @@ jobs:
         run: |
           rm -f packages/*
           make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-      
+
       - name: Publish artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: kbsynctool
           path: ${{ github.workspace }}/packages/*.deb
@@ -94,7 +94,7 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
         id: tag
         uses: dawidd6/action-get-tag@v1
-      
+
       - name: Build Release package
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: |
