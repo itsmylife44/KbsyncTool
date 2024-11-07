@@ -2,10 +2,6 @@ name: TheOS CI
 
 on:
   push:
-    #tags:
-    #  - 'v*'
-
-    #branches: [ master ]
   release:
     types:
       - created
@@ -24,10 +20,11 @@ jobs:
       ### Pre-init
       ################################################
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
           submodules: recursive
+
       - name: Update submodules
         run: |
           git submodule update --init --recursive
@@ -39,14 +36,15 @@ jobs:
       - name: Theos Setup (Check Cache)
         id: verify-cache
         run: |
-          echo "::set-output name=heads::`git ls-remote https://github.com/theos/theos | head -n 1 | cut -f 1`-`git ls-remote https://github.com/theos/sdks | head -n 1 | cut -f 1`"
+          heads="$(git ls-remote https://github.com/theos/theos | head -n 1 | cut -f 1)-$(git ls-remote https://github.com/theos/sdks | head -n 1 | cut -f 1)"
+          echo "heads=${heads}" >> $GITHUB_ENV
 
       - name: Theos Setup (Use Cache)
         id: cache
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: ${{ github.workspace }}/theos
-          key: ${{ runner.os }}-${{ steps.verify-cache.outputs.heads }}
+          key: ${{ runner.os }}-${{ env.heads }}
 
       - name: Theos Setup (Setup)
         uses: NyaMisty/theos-action@master
@@ -75,6 +73,7 @@ jobs:
           if [ ! -L "KbsyncTweak.plist" ]; then
             ln -s layout/Library/MobileSubstrate/DynamicLibraries/KbsyncTweak.plist
           fi
+
       # Enable tmate debugging of manually-triggered workflows if the input option was provided
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
@@ -87,7 +86,7 @@ jobs:
           make package _THEOS_DARWIN_CAN_USE_MODULES=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
       - name: Publish artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kbsynctool
           path: ${{ github.workspace }}/packages/*.deb
